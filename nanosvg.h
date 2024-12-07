@@ -146,6 +146,7 @@ void nsvgDelete(NSVGimage* image);
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <ctype.h>
 
 #define NSVG_PI (3.14159265358979323846264338327f)
 #define NSVG_KAPPA90 (0.5522847493f)	// Lenght proportional to radius of a cubic bezier handle for 90deg arcs.
@@ -1221,12 +1222,50 @@ static float nsvg__convertToPixels(NSVGparser* p, float val, const char* units, 
 	return val;
 }
 
+/* FIXED BUGS:
+ * bug1: call to sscanf in nsvg__parseFloat with a NULL string.
+ * bug2: found with afl++: faulty string in nsvg__parseFloat causing scanf to misbehave.
+ * bug3: found with honggfuzz and asan: parsing invalid or malformed strings without proper validation.
+ */
 static float nsvg__parseFloat(NSVGparser* p, const char* str, int dir)
 {
-	float val = 0;
-	char units[32]="";
-	sscanf(str, "%f%s", &val, units);
-	return nsvg__convertToPixels(p, val, units, dir);
+    // Ensure the input string is not NULL
+    if (str == NULL || *str == '\0') {
+        fprintf(stderr, "Error: NULL or empty string passed to nsvg__parseFloat\n");
+        return 0.0f;
+    }
+
+    // Check if the string contains only valid float characters
+    int valid = 1;
+    for (int i = 0; str[i] != '\0'; i++) {
+        if (!(isdigit((unsigned char)str[i]) || str[i] == '.' || str[i] == 'e' || 
+              str[i] == '-' || str[i] == '+' || isspace((unsigned char)str[i]))) {
+            valid = 0;
+            break;
+        }
+    }
+
+    if (!valid) {
+        fprintf(stderr, "Error: Invalid characters in string: '%s'\n", str);
+        return 0.0f;
+    }
+
+    float val = 0.0f;
+    char units[32] = "";
+
+    // Attempt to parse the float value and any trailing units
+    if (sscanf(str, "%f%31s", &val, units) < 1) {
+        fprintf(stderr, "Error: Failed to parse float value from string: '%s'\n", str);
+        return 0.0f;
+    }
+
+    // Validate the parser object
+    if (p == NULL) {
+        fprintf(stderr, "Error: NULL NSVGparser passed to nsvg__parseFloat\n");
+        return 0.0f;
+    }
+
+    return nsvg__convertToPixels(p, val, units, dir);
 }
 
 static int nsvg__parseTransformArgs(const char* str, float* args, int maxNa, int* na)
@@ -1384,62 +1423,72 @@ static void nsvg__parseUrl(char* id, const char* str)
 
 static void nsvg__parseStyle(NSVGparser* p, const char* str);
 
+/* FIXED BUG
+ * The issue in the nsvg__parseAttr function occurs when a NULL
+ * value is passed as the value in any of the comparisons or functions like strcmp.
+ */
 static int nsvg__parseAttr(NSVGparser* p, const char* name, const char* value)
 {
-	float xform[6];
-	NSVGattrib* attr = nsvg__getAttr(p);
-	if (!attr) return 0;
-	
-	if (strcmp(name, "style") == 0) {
-		nsvg__parseStyle(p, value);
-	} else if (strcmp(name, "display") == 0) {
-		if (strcmp(value, "none") == 0)
-			attr->visible = 0;
-		else
-			attr->visible = 1;
-	} else if (strcmp(name, "fill") == 0) {
-		if (strcmp(value, "none") == 0) {
-			attr->hasFill = 0;
-		} else if (strncmp(value, "url(", 4) == 0) {
-			attr->hasFill = 2;
-			nsvg__parseUrl(attr->fillGradient, value);
-		} else {
-			attr->hasFill = 1;
-			attr->fillColor = nsvg__parseColor(value);
-		}
-	} else if (strcmp(name, "opacity") == 0) {
-		attr->opacity = nsvg__parseFloat(p, value, 2);
-	} else if (strcmp(name, "fill-opacity") == 0) {
-		attr->fillOpacity = nsvg__parseFloat(p, value, 2);
-	} else if (strcmp(name, "stroke") == 0) {
-		if (strcmp(value, "none") == 0) {
-			attr->hasStroke = 0;
-		} else if (strncmp(value, "url(", 4) == 0) {
-			attr->hasStroke = 2;
-			nsvg__parseUrl(attr->strokeGradient, value);
-		} else {
-			attr->hasStroke = 1;
-			attr->strokeColor = nsvg__parseColor(value);
-		}
-	} else if (strcmp(name, "stroke-width") == 0) {
-		attr->strokeWidth = nsvg__parseFloat(p, value, 2);
-	} else if (strcmp(name, "stroke-opacity") == 0) {
-		attr->strokeOpacity = nsvg__parseFloat(NULL, value, 2);
-	} else if (strcmp(name, "font-size") == 0) {
-		attr->fontSize = nsvg__parseFloat(p, value, 2);
-	} else if (strcmp(name, "transform") == 0) {
-		nsvg__parseTransform(xform, value);
-		nsvg__xformPremultiply(attr->xform, xform);
-	} else if (strcmp(name, "stop-color") == 0) {
-		attr->stopColor = nsvg__parseColor(value);
-	} else if (strcmp(name, "stop-opacity") == 0) {
-		attr->stopOpacity = nsvg__parseFloat(NULL, value, 2);
-	} else if (strcmp(name, "offset") == 0) {
-		attr->stopOffset = nsvg__parseFloat(NULL, value, 2);
-	} else {
-		return 0;
-	}
-	return 1;
+	// check for null at the beginning
+    if (value == NULL) {
+        fprintf(stderr, "Error: NULL value passed for attribute: %s\n", name);
+        return 0;
+    }
+
+    float xform[6];
+    NSVGattrib* attr = nsvg__getAttr(p);
+    if (!attr) return 0;
+    
+    if (strcmp(name, "style") == 0) {
+        nsvg__parseStyle(p, value);
+    } else if (strcmp(name, "display") == 0) {
+        if (strcmp(value, "none") == 0)
+            attr->visible = 0;
+        else
+            attr->visible = 1;
+    } else if (strcmp(name, "fill") == 0) {
+        if (strcmp(value, "none") == 0) {
+            attr->hasFill = 0;
+        } else if (strncmp(value, "url(", 4) == 0) {
+            attr->hasFill = 2;
+            nsvg__parseUrl(attr->fillGradient, value);
+        } else {
+            attr->hasFill = 1;
+            attr->fillColor = nsvg__parseColor(value);
+        }
+    } else if (strcmp(name, "opacity") == 0) {
+        attr->opacity = nsvg__parseFloat(p, value, 2);
+    } else if (strcmp(name, "fill-opacity") == 0) {
+        attr->fillOpacity = nsvg__parseFloat(p, value, 2);
+    } else if (strcmp(name, "stroke") == 0) {
+        if (strcmp(value, "none") == 0) {
+            attr->hasStroke = 0;
+        } else if (strncmp(value, "url(", 4) == 0) {
+            attr->hasStroke = 2;
+            nsvg__parseUrl(attr->strokeGradient, value);
+        } else {
+            attr->hasStroke = 1;
+            attr->strokeColor = nsvg__parseColor(value);
+        }
+    } else if (strcmp(name, "stroke-width") == 0) {
+        attr->strokeWidth = nsvg__parseFloat(p, value, 2);
+    } else if (strcmp(name, "stroke-opacity") == 0) {
+        attr->strokeOpacity = nsvg__parseFloat(NULL, value, 2);
+    } else if (strcmp(name, "font-size") == 0) {
+        attr->fontSize = nsvg__parseFloat(p, value, 2);
+    } else if (strcmp(name, "transform") == 0) {
+        nsvg__parseTransform(xform, value);
+        nsvg__xformPremultiply(attr->xform, xform);
+    } else if (strcmp(name, "stop-color") == 0) {
+        attr->stopColor = nsvg__parseColor(value);
+    } else if (strcmp(name, "stop-opacity") == 0) {
+        attr->stopOpacity = nsvg__parseFloat(NULL, value, 2);
+    } else if (strcmp(name, "offset") == 0) {
+        attr->stopOffset = nsvg__parseFloat(NULL, value, 2);
+    } else {
+        return 0;
+    }
+    return 1;
 }
 
 static int nsvg__parseNameValue(NSVGparser* p, const char* start, const char* end)
@@ -2153,44 +2202,56 @@ static void nsvg__parsePoly(NSVGparser* p, const char** attr, int closeFlag)
 	nsvg__addShape(p);
 }
 
+/* BUG FIXED
+ * the issue in the nsvg__parseSVG function was caused by attempting 
+ * to parse NULL or malformed attribute values (such as empty strings) without proper validation, 
+ * leading to segmentation faults during string operations like sscanf and strstr.
+ */
 static void nsvg__parseSVG(NSVGparser* p, const char** attr)
 {
-	int i;
-	for (i = 0; attr[i]; i += 2) {
-		if (!nsvg__parseAttr(p, attr[i], attr[i + 1])) {
-			if (strcmp(attr[i], "width") == 0) {
-				p->image->width = nsvg__parseFloat(p, attr[i + 1], 0);
-			} else if (strcmp(attr[i], "height") == 0) {
-				p->image->height = nsvg__parseFloat(p, attr[i + 1], 1);
-			} else if (strcmp(attr[i], "viewBox") == 0) {
-				sscanf(attr[i + 1], "%f%*[%%, \t]%f%*[%%, \t]%f%*[%%, \t]%f", &p->viewMinx, &p->viewMiny, &p->viewWidth, &p->viewHeight);
-			} else if (strcmp(attr[i], "preserveAspectRatio") == 0) {
-				if (strstr(attr[i + 1], "none") != 0) {
-					// No uniform scaling
-					p->alignType = NSVG_ALIGN_NONE;
-				} else {
-					// Parse X align
-					if (strstr(attr[i + 1], "xMin") != 0)
-						p->alignX = NSVG_ALIGN_MIN;
-					else if (strstr(attr[i + 1], "xMid") != 0)
-						p->alignX = NSVG_ALIGN_MID;
-					else if (strstr(attr[i + 1], "xMax") != 0)
-						p->alignX = NSVG_ALIGN_MAX;
-					// Parse X align
-					if (strstr(attr[i + 1], "yMin") != 0)
-						p->alignY = NSVG_ALIGN_MIN;
-					else if (strstr(attr[i + 1], "yMid") != 0)
-						p->alignY = NSVG_ALIGN_MID;
-					else if (strstr(attr[i + 1], "yMax") != 0)
-						p->alignY = NSVG_ALIGN_MAX;
-					// Parse meet/slice
-					p->alignType = NSVG_ALIGN_MEET;
-					if (strstr(attr[i + 1], "slice") != 0)
-						p->alignType = NSVG_ALIGN_SLICE;
-				}
-			}
-		}
-	}
+    int i;
+    for (i = 0; attr[i]; i += 2) {
+        if (!nsvg__parseAttr(p, attr[i], attr[i + 1])) {
+            // Check if attribute value exists before using it
+            if (strcmp(attr[i], "width") == 0 && attr[i + 1] != NULL) {
+                p->image->width = nsvg__parseFloat(p, attr[i + 1], 0);
+            } else if (strcmp(attr[i], "height") == 0 && attr[i + 1] != NULL) {
+                p->image->height = nsvg__parseFloat(p, attr[i + 1], 1);
+            } else if (strcmp(attr[i], "viewBox") == 0 && attr[i + 1] != NULL) {
+                // Ensure the string is not NULL or empty before sscanf
+                if (sscanf(attr[i + 1], "%f%*[%%, \t]%f%*[%%, \t]%f%*[%%, \t]%f", 
+                           &p->viewMinx, &p->viewMiny, &p->viewWidth, &p->viewHeight) < 4) {
+                    fprintf(stderr, "Error: Failed to parse viewBox from string: '%s'\n", attr[i + 1]);
+                }
+            } else if (strcmp(attr[i], "preserveAspectRatio") == 0 && attr[i + 1] != NULL) {
+                if (strstr(attr[i + 1], "none") != NULL) {
+                    // No uniform scaling
+                    p->alignType = NSVG_ALIGN_NONE;
+                } else {
+                    // Parse X align
+                    if (strstr(attr[i + 1], "xMin") != NULL)
+                        p->alignX = NSVG_ALIGN_MIN;
+                    else if (strstr(attr[i + 1], "xMid") != NULL)
+                        p->alignX = NSVG_ALIGN_MID;
+                    else if (strstr(attr[i + 1], "xMax") != NULL)
+                        p->alignX = NSVG_ALIGN_MAX;
+                    
+                    // Parse Y align
+                    if (strstr(attr[i + 1], "yMin") != NULL)
+                        p->alignY = NSVG_ALIGN_MIN;
+                    else if (strstr(attr[i + 1], "yMid") != NULL)
+                        p->alignY = NSVG_ALIGN_MID;
+                    else if (strstr(attr[i + 1], "yMax") != NULL)
+                        p->alignY = NSVG_ALIGN_MAX;
+                    
+                    // Parse meet/slice
+                    p->alignType = NSVG_ALIGN_MEET;
+                    if (strstr(attr[i + 1], "slice") != NULL)
+                        p->alignType = NSVG_ALIGN_SLICE;
+                }
+            }
+        }
+    }
 }
 
 static void nsvg__parseGradient(NSVGparser* p, const char** attr, char type)
